@@ -1,4 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:file_selector/file_selector.dart';
+import 'package:excel/excel.dart';
+import 'package:csv/csv.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:io';
 
 void main() {
   runApp(const MyApp());
@@ -7,116 +12,649 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'GGI Holland - Stier Adviezen',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0066CC),
+          brightness: Brightness.light,
+        ),
+        useMaterial3: true,
+        appBarTheme: const AppBarTheme(
+          elevation: 0,
+          centerTitle: true,
+        ),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const MyHomePage(),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+  const MyHomePage({super.key});
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+  Map<String, List<String>> excelData = {};
+  bool filePicked = false;
+  bool isLoading = false;
+  String selectedFilePath = '';
+  TextEditingController searchController = TextEditingController();
+  List<String>? searchResults;
 
-  void _incrementCounter() {
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedFile();
+  }
+
+  Future<void> _loadSavedFile() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedPath = prefs.getString('excel_file_path');
+    
+    if (savedPath != null && File(savedPath).existsSync()) {
+      setState(() {
+        selectedFilePath = savedPath;
+      });
+      await _loadExcelFile(savedPath);
+    }
+  }
+
+  Future<void> _pickFile() async {
+    try {
+      final List<XTypeGroup> typeGroups = <XTypeGroup>[
+        const XTypeGroup(
+          label: 'Spreadsheets',
+          extensions: <String>['xlsx', 'csv'],
+        ),
+        const XTypeGroup(
+          label: 'Excel files',
+          extensions: <String>['xlsx'],
+        ),
+        const XTypeGroup(
+          label: 'CSV files',
+          extensions: <String>['csv'],
+        ),
+      ];
+      
+      final XFile? file = await openFile(
+        acceptedTypeGroups: typeGroups,
+      );
+
+      if (file == null) {
+        return;
+      }
+
+      String filePath = file.path;
+      
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('excel_file_path', filePath);
+      
+      setState(() {
+        selectedFilePath = filePath;
+        searchResults = null;
+      });
+      
+      await _loadExcelFile(filePath);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Fout: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _loadExcelFile(String filePath) async {
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      isLoading = true;
     });
+
+    try {
+      Map<String, List<String>> tempData = {};
+
+      if (filePath.endsWith('.csv')) {
+        // Parse CSV file
+        final file = File(filePath);
+        final content = await file.readAsString();
+        final List<List<dynamic>> rows = const CsvToListConverter().convert(content);
+
+        if (rows.isEmpty) {
+          setState(() {
+            isLoading = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Bestand is leeg'),
+              backgroundColor: Colors.red,
+            ),
+          );
+          return;
+        }
+
+        // Parse headers (first row)
+        List<String> headers = [];
+        for (var cell in rows.first) {
+          headers.add(cell?.toString().trim() ?? '');
+        }
+
+        // Find column indices (case-insensitive)
+        int koeIndex = -1;
+        int advies1Index = -1;
+        int advies2Index = -1;
+        int advies3Index = -1;
+
+        for (int i = 0; i < headers.length; i++) {
+          String header = headers[i].toLowerCase();
+          if (header.contains('koe')) koeIndex = i;
+          if (header.contains('advies') && header.contains('stier') && header.contains('1')) advies1Index = i;
+          if (header.contains('advies') && header.contains('stier') && header.contains('2')) advies2Index = i;
+          if (header.contains('advies') && header.contains('stier') && header.contains('3')) advies3Index = i;
+        }
+
+        // Check if required columns found
+        if (koeIndex == -1) {
+          setState(() {
+            isLoading = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Kolom "Koe" niet gevonden.\nGevonden kolommen: ${headers.join(", ")}'),
+              backgroundColor: Colors.red,
+            ),
+          );
+          return;
+        }
+
+        // Parse data rows
+        for (int i = 1; i < rows.length; i++) {
+          var row = rows[i];
+          if (row.length > koeIndex && row[koeIndex] != null && row[koeIndex].toString().isNotEmpty) {
+            String koeNummer = row[koeIndex].toString().trim();
+            List<String> advies = [];
+            
+            if (advies1Index >= 0 && row.length > advies1Index && row[advies1Index] != null) {
+              String val = row[advies1Index].toString().trim();
+              if (val.isNotEmpty) advies.add(val);
+            }
+            if (advies2Index >= 0 && row.length > advies2Index && row[advies2Index] != null) {
+              String val = row[advies2Index].toString().trim();
+              if (val.isNotEmpty) advies.add(val);
+            }
+            if (advies3Index >= 0 && row.length > advies3Index && row[advies3Index] != null) {
+              String val = row[advies3Index].toString().trim();
+              if (val.isNotEmpty) advies.add(val);
+            }
+            
+            if (advies.isNotEmpty) {
+              tempData[koeNummer] = advies;
+            }
+          }
+        }
+      } else {
+        // Parse Excel file
+        final bytes = await File(filePath).readAsBytes();
+        var excel = Excel.decodeBytes(bytes);
+
+        for (var table in excel.tables.keys) {
+          var sheet = excel.tables[table];
+          if (sheet == null) continue;
+
+          // Parse headers (first row)
+          List<String> headers = [];
+          if (sheet.rows.isNotEmpty) {
+            for (var cell in sheet.rows.first) {
+              headers.add(cell?.value?.toString() ?? '');
+            }
+          }
+
+          // Find column indices (case-insensitive)
+          int koeIndex = -1;
+          int advies1Index = -1;
+          int advies2Index = -1;
+          int advies3Index = -1;
+
+          for (int i = 0; i < headers.length; i++) {
+            String header = headers[i].toLowerCase();
+            if (header.contains('koe')) koeIndex = i;
+            if (header.contains('advies') && header.contains('stier') && header.contains('1')) advies1Index = i;
+            if (header.contains('advies') && header.contains('stier') && header.contains('2')) advies2Index = i;
+            if (header.contains('advies') && header.contains('stier') && header.contains('3')) advies3Index = i;
+          }
+
+          // Check if required columns found
+          if (koeIndex == -1) {
+            setState(() {
+              isLoading = false;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Kolom "Koe" niet gevonden.\nGevonden kolommen: ${headers.join(", ")}'),
+                backgroundColor: Colors.red,
+              ),
+            );
+            return;
+          }
+
+          // Parse data rows
+          for (int i = 1; i < sheet.rows.length; i++) {
+            var row = sheet.rows[i];
+            if (row.length > koeIndex && row[koeIndex] != null) {
+              String koeNummer = row[koeIndex]!.value?.toString() ?? '';
+              if (koeNummer.isNotEmpty) {
+                List<String> advies = [];
+                
+                if (advies1Index >= 0 && row.length > advies1Index && row[advies1Index] != null) {
+                  String val = row[advies1Index]!.value?.toString() ?? '';
+                  if (val.isNotEmpty) advies.add(val);
+                }
+                if (advies2Index >= 0 && row.length > advies2Index && row[advies2Index] != null) {
+                  String val = row[advies2Index]!.value?.toString() ?? '';
+                  if (val.isNotEmpty) advies.add(val);
+                }
+                if (advies3Index >= 0 && row.length > advies3Index && row[advies3Index] != null) {
+                  String val = row[advies3Index]!.value?.toString() ?? '';
+                  if (val.isNotEmpty) advies.add(val);
+                }
+                
+                if (advies.isNotEmpty) {
+                  tempData[koeNummer] = advies;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      setState(() {
+        excelData = tempData;
+        filePicked = true;
+        isLoading = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${excelData.length} koeiën geladen!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      setState(() {
+        isLoading = false;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Fout bij lezen bestand: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _searchKoe(String query) {
+    query = query.trim();
+    
+    if (query.isEmpty) {
+      setState(() {
+        searchResults = null;
+      });
+      return;
+    }
+
+    // Try exact match first
+    if (excelData.containsKey(query)) {
+      setState(() {
+        searchResults = excelData[query];
+      });
+    } else {
+      // Try partial match if exact match fails
+      List<String> matches = [];
+      excelData.forEach((key, value) {
+        if (key.toLowerCase().contains(query.toLowerCase())) {
+          matches.add(key);
+        }
+      });
+      
+      if (matches.isNotEmpty) {
+        setState(() {
+          searchResults = excelData[matches.first];
+        });
+      } else {
+        setState(() {
+          searchResults = [];
+        });
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('GGI Holland - Stier Adviezen'),
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Colors.white,
+        actions: [
+          if (filePicked)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: _pickFile,
+              tooltip: 'Ander bestand kiezen',
+            ),
+        ],
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : !filePicked
+              ? _buildFilePickerPage()
+              : _buildSearchPage(),
+    );
+  }
+
+  Widget _buildFilePickerPage() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.file_present,
+            size: 80,
+            color: Colors.grey[400],
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Excel-bestand nodig',
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 12),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 32),
+            child: Text(
+              'Kies het Excel-bestand met de koeigegevens',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 16,
+                color: Colors.grey,
+              ),
+            ),
+          ),
+          const SizedBox(height: 32),
+          ElevatedButton.icon(
+            onPressed: _pickFile,
+            icon: const Icon(Icons.folder_open),
+            label: const Text('Bestand kiezen'),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 32,
+                vertical: 16,
+              ),
+              backgroundColor: Theme.of(context).colorScheme.primary,
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchPage() {
+    return Column(
+      children: [
+        // Search Bar
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                Theme.of(context).colorScheme.primary,
+                Theme.of(context).colorScheme.primaryContainer,
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Koennummer opzoeken',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: searchController,
+                onChanged: _searchKoe,
+                decoration: InputDecoration(
+                  hintText: 'Voer koennummer in (bijv. 6949)',
+                  prefixIcon: const Icon(Icons.search),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  filled: true,
+                  fillColor: Colors.white,
+                ),
+              ),
+            ],
+          ),
+        ),
+        // Results
+        Expanded(
+          child: searchResults == null
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.search,
+                        size: 64,
+                        color: Colors.grey[400],
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Zoek een koennummer',
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: Colors.grey[600],
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.withAlpha(51),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Column(
+                          children: [
+                            Text(
+                              'Geladen nummers: ${excelData.length}',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            if (excelData.isNotEmpty)
+                              Text(
+                                'Bijv: ${excelData.keys.take(3).join(", ")}',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : searchResults!.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.not_interested,
+                            size: 64,
+                            color: Colors.red[300],
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Koennummer niet gevonden',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.red[600],
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : SingleChildScrollView(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .primary
+                                  .withAlpha(51),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.check_circle,
+                                  color: Theme.of(context).colorScheme.primary,
+                                  size: 32,
+                                ),
+                                const SizedBox(width: 12),
+                                Text(
+                                  'Koe: ${searchController.text}',
+                                  style: const TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          const Text(
+                            'Stier adviezen:',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          ...List.generate(
+                            searchResults!.length,
+                            (index) => _buildAdviceCard(
+                              stierAdvice: searchResults![index],
+                              advisIndex: index + 1,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAdviceCard({
+    required String stierAdvice,
+    required int advisIndex,
+  }) {
+    final colors = [
+      const Color(0xFF0066CC),
+      const Color(0xFF00AA66),
+      const Color(0xFFFF6600),
+    ];
+    
+    final color = colors[advisIndex - 1];
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+            Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: color.withAlpha(51),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Center(
+                    child: Text(
+                      '$advisIndex',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 18,
+                        color: color,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Advies stier $advisIndex',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        stierAdvice,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ),
     );
+  }
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
   }
 }
