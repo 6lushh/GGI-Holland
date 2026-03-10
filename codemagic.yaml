@@ -1,0 +1,27 @@
+workflows:
+  android-apk:
+    name: Android APK
+    instance_type: linux_x2
+    environment:
+      android_signing_config: example_Florence
+      groups:
+        - google_play
+    triggering:
+      events:
+        - push
+      branch:
+        pattern: main
+        include: true
+    scripts:
+      - name: Set up local.properties
+        script: |
+          echo "flutter.sdk=$HOME/programs/flutter" > "$ANDROID_HOME/local.properties"
+      - name: Get packages
+        script: flutter pub get
+      - name: Build APK
+        script: flutter build apk --release
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+    email:
+      success: false
+      failure: false
